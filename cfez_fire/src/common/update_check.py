@@ -23,13 +23,14 @@ HOST = "https://79ecf59845b9061dd3d3a9d55cf83772.hjylock.top"
 # HOST = "http://192.168.1.34:9825"
 # HOST = "http://127.0.0.1:8000"
 API_URL = f"{HOST}/check-updates"
+GITHUB_UPDATE_URL = "https://gh-proxy.org/https://raw.githubusercontent.com/hjy2008/Spark/main/update.json"
 LOGIN_URL = f"{HOST}/login"
 AUTO_LOGIN_URL = f"{HOST}/auto-login"
 FEEDBACK_URL = f"{HOST}/feedback"
 UPLOAD_AVATAR_URL = f"{HOST}/upload-avatar"
 CRASH_REPORT_URL = f"{HOST}/crash-report"
 MEDIA_PARSE_URL = f"{HOST}/media_parse"
-CURRENT_VERSION = "v1.0.1"
+CURRENT_VERSION = "v1.0.0"
 
 
 class CheckUpdateThread(QThread):
@@ -44,17 +45,30 @@ class CheckUpdateThread(QThread):
     def run(self):
         dbg("[CheckUpdateThread] run() started")
         try:
-            body = encrypt_payload({"current_version": self.current_version})
-            dbg(f"[CheckUpdateThread] POST {self.url}")
-            resp = _session.post(self.url, json={"data": body}, timeout=5)
-            dbg(f"[CheckUpdateThread] HTTP {resp.status_code}")
-            resp.raise_for_status()
-            decrypted = aes_decrypt(resp.json()["data"])
-            dbg(f"[CheckUpdateThread] response keys={list(decrypted.keys())}")
+            response = requests.get(self.url, timeout=10).json()
+            # print(bool(self.compare_versions(response['latest_version'], CURRENT_VERSION)))
+            decrypted = {
+                "has_update": self.compare_versions(response['latest_version'], CURRENT_VERSION),
+                "download_url": response['download_url'],
+                'latest_version': response['latest_version']
+            }
+            # print(decrypted)
             self.finished.emit(decrypted)
         except Exception as e:
             dbg(f"[CheckUpdateThread] error: {e}")
             self.finished.emit({"has_update": False, "error": str(e)})
+
+    @staticmethod
+    def compare_versions(v1: str, v2: str) -> int:
+        """Compare two version strings like "v1.0.0" and "v1.0.1".
+        Returns 1 if v1 > v2, -1 if v1 < v2, 0 if equal.
+        """
+
+        def parse(v: str):
+            return tuple(int(p) for p in v.lstrip("vV").split("."))
+
+        a, b = parse(v1), parse(v2)
+        return (a > b) - (a < b)
 
 
 class DownloadThread(QThread):
@@ -241,3 +255,4 @@ class UploadAvatarThread(QThread):
         except Exception as e:
             dbg(f"[UploadAvatarThread] exception: {e}")
             self.uploadFinished.emit({"success": False, "error": str(e)})
+

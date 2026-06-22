@@ -42,7 +42,7 @@ AVATAR_DIR = Path(__file__).resolve().parent / "avatars"
 AVATAR_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/avatars", StaticFiles(directory=str(AVATAR_DIR)), name="avatars")
 
-LATEST_VERSION = "v1.0.1"
+LATEST_VERSION = "v1.0.0"
 
 CAMERA_GROUPS = {
     "A楼  明德楼": [

@@ -1,7 +1,7 @@
 {
-  "latest_version": "v1.0.1",
-  "download_url": "https://gh-proxy.org/https://github.com/hjy2008/Spark/releases/download/v1.0.1/Spark_Setup_Latest.exe",
-  "sha256": "6be37c8dc731b5250d66c0fa272a4ac7b38ece5c5cf637c81d92d4c20922cc0c",
-  "release_notes": "Spark 正式发布！",
+  "latest_version": "v1.0.0",
+  "download_url": "https://gh-proxy.org/https://github.com/hjy2008/Spark/releases/download/v1.0.0/Spark_Setup_Latest.exe",
+  "sha256": "db6db74e0ce5c8ebc6e5c69c56977c9fc3aa08a7f32d63dc2470ce25908cfe5d",
+  "release_notes": "内测",
   "release_date": "2026-06-23"
 }
