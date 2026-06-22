@@ -1,5 +1,6 @@
 import html
 import json
+import secrets
 import shutil
 import sqlite3
 import time
@@ -31,7 +32,8 @@ app = FastAPI(
     "## 加密说明\n"
     "- **请求体加密**: 客户端用 RSA-2048 OAEP 公钥加密 JSON → `EncryptedBody.data`\n"
     "- **响应体加密**: 服务端用 AES-256-CBC 加密 JSON → `response.data`\n"
-    "- 反馈接口使用 AES 双向加密",
+    "- 反馈接口使用 AES 双向加密\n"
+    "- 崩溃日志使用 AES 双向加密",
     version="1.0.0",
     contact={"name": "cfez_fire"},
 )
@@ -196,13 +198,24 @@ _AES_IV = bytes.fromhex("5306172bb00e3353c7cc8f0fbd31632d")
 
 _DB_PATH = Path("/tmp/data.db")
 
+_SUGGEST_DB_PATH = Path("/tmp/suggest.db")
+
+_CRASH_DB_PATH = Path("/tmp/crash.db")
+
 _LIMIT = 5
 _WINDOW = 60
 _login_attempts: dict[str, list[float]] = {}
+_blocked_ips: dict[str, float] = {}
+_blocked_devices: dict[str, float] = {}
+_FAIL_BAN = 50
+_FAIL_BAN_WINDOW = 86400
+_FAIL_BAN_DURATION = 86400
 
 
 def _rate_limit(ip: str) -> bool:
     now = time.time()
+    if ip in _blocked_ips and now - _blocked_ips[ip] < _FAIL_BAN_DURATION:
+        return False
     timestamps = _login_attempts.get(ip, [])
     timestamps = [t for t in timestamps if now - t < _WINDOW]
     if len(timestamps) >= _LIMIT:
@@ -212,11 +225,83 @@ def _rate_limit(ip: str) -> bool:
     return True
 
 
+def _check_device_ban(device_id: str, ip: str) -> bool:
+    now = time.time()
+    conn = sqlite3.connect(str(_DB_PATH))
+    # check permanent ban
+    perm = conn.execute(
+        "SELECT 1 FROM banned_devices WHERE device_id=? AND permanent=1", (device_id,)
+    ).fetchone()
+    if perm:
+        conn.execute("INSERT OR IGNORE INTO banned_ips (ip,permanent) VALUES (?,1)", (ip,))
+        conn.commit()
+        conn.close()
+        return False
+    perm_ip = conn.execute(
+        "SELECT 1 FROM banned_ips WHERE ip=? AND permanent=1", (ip,)
+    ).fetchone()
+    if perm_ip:
+        conn.close()
+        return False
+    # check temporary ban
+    if device_id in _blocked_devices and now - _blocked_devices[device_id] < _FAIL_BAN_DURATION:
+        _blocked_ips[ip] = now
+        conn.close()
+        return False
+    # count recent failures
+    cutoff = (datetime.now() - timedelta(seconds=_FAIL_BAN_WINDOW)).isoformat()
+    row = conn.execute(
+        "SELECT COUNT(*) FROM login_log WHERE device_id=? AND created_at>=? AND success=0",
+        (device_id, cutoff),
+    ).fetchone()
+    count = row[0] if row else 0
+    if count >= _FAIL_BAN:
+        _blocked_devices[device_id] = now
+        _blocked_ips[ip] = now
+        conn.execute(
+            "INSERT INTO banned_devices (device_id,permanent) VALUES (?,0)", (device_id,)
+        )
+        conn.execute(
+            "INSERT INTO banned_ips (ip,permanent) VALUES (?,0)", (ip,)
+        )
+        # check if 3rd+ ban → permanent
+        ban_count = conn.execute(
+            "SELECT COUNT(*) FROM banned_devices WHERE device_id=?", (device_id,)
+        ).fetchone()[0]
+        if ban_count >= 3:
+            conn.execute(
+                "UPDATE banned_devices SET permanent=1 WHERE device_id=?", (device_id,)
+            )
+            conn.execute(
+                "UPDATE banned_ips SET permanent=1 WHERE ip=?", (ip,)
+            )
+        conn.commit()
+        conn.close()
+        return False
+    conn.close()
+    return True
+
+
 _SUGGEST_DB_PATH = Path("/tmp/suggest.db")
+
+_MEDIA_PARSE_LIMIT = 7
+_MEDIA_PARSE_WINDOW = 60
+_media_parse_attempts: dict[str, list[float]] = {}
 
 _FEEDBACK_LIMIT = 5
 _FEEDBACK_WINDOW = 60
 _feedback_attempts: dict[str, list[float]] = {}
+
+
+def _media_parse_rate_limit(device_id: str) -> bool:
+    now = time.time()
+    timestamps = _media_parse_attempts.get(device_id, [])
+    timestamps = [t for t in timestamps if now - t < _MEDIA_PARSE_WINDOW]
+    if len(timestamps) >= _MEDIA_PARSE_LIMIT:
+        return False
+    timestamps.append(now)
+    _media_parse_attempts[device_id] = timestamps
+    return True
 
 
 def _feedback_rate_limit(device_id: str) -> bool:
@@ -250,7 +335,7 @@ _init_suggest_db()
 
 
 def _init_crash_log_db():
-    conn = sqlite3.connect(str(_DB_PATH))
+    conn = sqlite3.connect(str(_CRASH_DB_PATH))
     conn.execute(
         "CREATE TABLE IF NOT EXISTS crash_logs ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -259,15 +344,44 @@ def _init_crash_log_db():
         "  os TEXT,"
         "  traceback TEXT,"
         "  log_tail TEXT,"
+        "  status TEXT DEFAULT 'pending',"
         "  created_at TEXT DEFAULT (datetime('now','localtime'))"
         ")"
     )
+    try:
+        conn.execute("ALTER TABLE crash_logs ADD COLUMN status TEXT DEFAULT 'pending'")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
 
 _init_crash_log_db()
 
+
+def _init_users_db():
+    conn = sqlite3.connect(str(_DB_PATH))
+    conn.execute("CREATE TABLE IF NOT EXISTS users (name TEXT, phone TEXT, avatar_file TEXT DEFAULT '')")
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN avatar_file TEXT DEFAULT ''")
+    except Exception:
+        pass
+    conn.commit()
+    conn.close()
+
+
+_init_users_db()
+
+
+def _init_ban_db():
+    conn = sqlite3.connect(str(_DB_PATH))
+    conn.execute("CREATE TABLE IF NOT EXISTS banned_devices (device_id TEXT, permanent INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now','localtime')))")
+    conn.execute("CREATE TABLE IF NOT EXISTS banned_ips (ip TEXT, permanent INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now','localtime')))")
+    conn.commit()
+    conn.close()
+
+
+_init_ban_db()
 
 _CRASH_LIMIT = 3
 _CRASH_WINDOW = 300
@@ -343,7 +457,7 @@ def _device_daily_limit(device_id: str) -> bool:
     cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
     conn = sqlite3.connect(str(_DB_PATH))
     row = conn.execute(
-        "SELECT COUNT(*) FROM login_log WHERE device_id=? AND created_at>=?",
+        "SELECT COUNT(*) FROM login_log WHERE device_id=? AND created_at>=? AND success=0",
         (device_id, cutoff),
     ).fetchone()
     conn.close()
@@ -476,16 +590,16 @@ def login(body: EncryptedBody, request: Request):
     hostname = payload.get("hostname", "")
     os = payload.get("os", "")
 
-    if device_id and not _device_daily_limit(device_id):
+    if device_id and not _check_device_ban(device_id, ip):
         _log_login(username, device_id, hostname, os, False)
         return JSONResponse(
             status_code=429,
-            content={"data": _aes_encrypt({"success": False, "error": "该设备今日登录次数已达上限"})},
+            content={"data": _aes_encrypt({"success": False, "error": "登录失败次数过多，已被暂时封锁"})},
         )
 
     conn = sqlite3.connect(str(_DB_PATH))
     row = conn.execute(
-        "SELECT name FROM users WHERE name=? AND phone=?", (username, phone)
+        "SELECT name, avatar_file FROM users WHERE name=? AND phone=?", (username, phone)
     ).fetchone()
     conn.close()
 
@@ -495,6 +609,9 @@ def login(body: EncryptedBody, request: Request):
     result = {"success": success}
     if success:
         result["camera_groups"] = CAMERA_GROUPS
+        avatar_file = row[1]
+        if avatar_file:
+            result["avatar_url"] = f"/avatars/{avatar_file}"
     return {"data": _aes_encrypt(result)}
 
 
@@ -527,7 +644,7 @@ def auto_login(body: EncryptedBody, request: Request):
         )
         aes_cipher = Cipher(algorithms.AES(_AES_KEY), modes.CBC(_AES_IV))
         aes_decryptor = aes_cipher.decryptor()
-        padded = aes_decryptor.update(b64decode(rsa_plain.decode("ascii"))) + aes_decryptor.finalize()
+        padded = aes_decryptor.update(rsa_plain) + aes_decryptor.finalize()
         unpadder = sym_padding.PKCS7(128).unpadder()
         plain = unpadder.update(padded) + unpadder.finalize()
         payload = json.loads(plain.decode("utf-8"))
@@ -546,16 +663,16 @@ def auto_login(body: EncryptedBody, request: Request):
         _log_login(username, device_id, hostname, os, False)
         return {"data": _aes_encrypt({"success": False, "error": "登录凭证已过期"})}
 
-    if device_id and not _device_daily_limit(device_id):
+    if device_id and not _check_device_ban(device_id, ip):
         _log_login(username, device_id, hostname, os, False)
         return JSONResponse(
             status_code=429,
-            content={"data": _aes_encrypt({"success": False, "error": "该设备今日登录次数已达上限"})},
+            content={"data": _aes_encrypt({"success": False, "error": "登录失败次数过多，已被暂时封锁"})},
         )
 
     conn = sqlite3.connect(str(_DB_PATH))
     row = conn.execute(
-        "SELECT name FROM users WHERE name=? AND phone=?", (username, phone)
+        "SELECT name, avatar_file FROM users WHERE name=? AND phone=?", (username, phone)
     ).fetchone()
     conn.close()
 
@@ -565,6 +682,9 @@ def auto_login(body: EncryptedBody, request: Request):
     result = {"success": success, "username": username, "phone": phone}
     if success:
         result["camera_groups"] = CAMERA_GROUPS
+        avatar_file = row[1]
+        if avatar_file:
+            result["avatar_url"] = f"/avatars/{avatar_file}"
     return {"data": _aes_encrypt(result)}
 
 
@@ -582,12 +702,21 @@ def upload_avatar(username: str = Form(...), avatar: UploadFile = File(...)):
     if not avatar.content_type or not avatar.content_type.startswith("image/"):
         return {"data": _aes_encrypt({"success": False, "error": "仅支持图片格式"})}
 
-    ext = Path(avatar.filename).suffix or ".png"
-    dest = AVATAR_DIR / f"{username}{ext}"
+    import hashlib
+    salt = secrets.token_hex(8)
+    avatar_file = hashlib.md5(f"{username}{salt}".encode()).hexdigest() + ".png"
+    dest = AVATAR_DIR / avatar_file
     with open(dest, "wb") as f:
         shutil.copyfileobj(avatar.file, f)
 
-    return {"data": _aes_encrypt({"success": True, "url": f"/avatars/{username}{ext}"})}
+    conn = sqlite3.connect(str(_DB_PATH))
+    conn.execute(
+        "UPDATE users SET avatar_file=? WHERE name=?", (avatar_file, username)
+    )
+    conn.commit()
+    conn.close()
+
+    return {"data": _aes_encrypt({"success": True, "url": f"/avatars/{avatar_file}"})}
 
 
 class AesBody(BaseModel):
@@ -642,15 +771,16 @@ def feedback(body: AesBody):
 
 
 @app.post("/crash-report", summary="上报崩溃日志", tags=["客户端"])
-def crash_report(body: EncryptedBody):
+def crash_report(body: AesBody):
     """客户端异常崩溃时自动上报日志。
 
-    RSA 加密请求体格式 (解密后):
+    AES 加密请求体格式 (解密后):
     ```json
     {"device_id": "xxx", "hostname": "PC-1", "os": "Windows", "traceback": "...", "log_tail": "..."}
     ```
     """
-    payload = _decrypt_payload(body.data)
+    _init_crash_log_db()
+    payload = _aes_decrypt(body.data)
     device_id = payload.get("device_id", "")
     if not device_id:
         return JSONResponse(
@@ -664,9 +794,9 @@ def crash_report(body: EncryptedBody):
             content={"data": _aes_encrypt({"success": False, "error": "上报过于频繁"})},
         )
 
-    conn = sqlite3.connect(str(_DB_PATH))
+    conn = sqlite3.connect(str(_CRASH_DB_PATH))
     conn.execute(
-        "INSERT INTO crash_logs (device_id, hostname, os, traceback, log_tail) VALUES (?,?,?,?,?)",
+        "INSERT INTO crash_logs (device_id, hostname, os, traceback, log_tail, status) VALUES (?,?,?,?,?,'pending')",
         (
             device_id,
             payload.get("hostname", ""),
@@ -686,7 +816,7 @@ def parse_media(body: EncryptedBody):
 
     **RSA 加密请求体格式 (解密后):**
     ```json
-    {"text": "https://v.douyin.com/xxxx/"}
+    {"text": "https://v.douyin.com/xxxx/", "device_id": "xxx", "hostname": "PC-1", "os": "Windows"}
     ```
 
     **AES 解密响应体格式:**
@@ -697,6 +827,15 @@ def parse_media(body: EncryptedBody):
     try:
         payload = _decrypt_payload(body.data)
         text = payload.get("text", "")
+        device_id = payload.get("device_id", "")
+        hostname = payload.get("hostname", "")
+        os = payload.get("os", "")
+
+        if not device_id:
+            return {"data": _aes_encrypt({"retcode": 400, "retdesc": "缺少设备标识", "data": None, "succ": False})}
+
+        if not _media_parse_rate_limit(device_id):
+            return {"data": _aes_encrypt({"retcode": 429, "retdesc": "请求过于频繁，请稍后再试", "data": None, "succ": False})}
 
         redirect_url = WebFetcher.fetch_redirect_url(UrlParser.get_url(text))
         platform = DOMAIN_TO_NAME.get(UrlParser.get_domain(redirect_url))
@@ -764,6 +903,26 @@ def delete_suggestion(sid: int):
     """根据 ID 删除一条用户反馈。"""
     conn = sqlite3.connect(str(_SUGGEST_DB_PATH))
     conn.execute("DELETE FROM suggestions WHERE id=?", (sid,))
+    conn.commit()
+    conn.close()
+    return {"success": True}
+
+
+@app.delete("/crash-logs/{cid}", summary="删除崩溃日志", tags=["管理"])
+def delete_crash_log(cid: int):
+    """根据 ID 删除一条崩溃日志。"""
+    conn = sqlite3.connect(str(_CRASH_DB_PATH))
+    conn.execute("DELETE FROM crash_logs WHERE id=?", (cid,))
+    conn.commit()
+    conn.close()
+    return {"success": True}
+
+
+@app.put("/crash-logs/{cid}/resolve", summary="标记崩溃已解决", tags=["管理"])
+def resolve_crash_log(cid: int):
+    """将崩溃日志标记为已解决。"""
+    conn = sqlite3.connect(str(_CRASH_DB_PATH))
+    conn.execute("UPDATE crash_logs SET status='resolved' WHERE id=?", (cid,))
     conn.commit()
     conn.close()
     return {"success": True}
@@ -922,6 +1081,14 @@ td.traceback { max-width: 500px; white-space: pre-wrap; word-break: break-all; f
 td.logtail { max-width: 400px; white-space: pre-wrap; word-break: break-all; font-family: Consolas, monospace; font-size: 12px; background: #fafafa; }
 .detail-btn { display:inline-block; background:#c0392b; color:#fff; border-radius:6px; padding:4px 14px; font-size:13px; cursor:pointer; text-decoration:none; border:none; }
 .detail-btn:hover { background:#a93226; }
+.del-btn { display:inline-block; background:#e74c3c; color:#fff; border-radius:6px; padding:4px 14px; font-size:13px; cursor:pointer; text-decoration:none; border:none; }
+.del-btn:hover { background:#c0392b; }
+.resolve-btn { display:inline-block; background:#27ae60; color:#fff; border-radius:6px; padding:4px 14px; font-size:13px; cursor:pointer; text-decoration:none; border:none; }
+.resolve-btn:hover { background:#219a52; }
+.status-badge { display:inline-block; padding:2px 10px; border-radius:10px; font-size:12px; font-weight:bold; }
+.status-badge.pending { background:#fdf2f2; color:#c0392b; }
+.status-badge.resolved { background:#f0faf0; color:#27ae60; }
+tr.status-resolved { opacity:0.6; }
 .modal-overlay { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,.5); z-index:1000; }
 .modal { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); background:#fff; border-radius:12px; padding:24px; width:80%; max-height:80vh; overflow:auto; z-index:1001; box-shadow: 0 8px 32px rgba(0,0,0,.3); }
 .modal h2 { margin-top:0; color:#333; }
@@ -937,29 +1104,33 @@ def crash_logs_page(_=Depends(_verify_admin)):
 
     需 HTTP Basic Auth 认证 (`admin` / `admin123`)。
     """
-    conn = sqlite3.connect(str(_DB_PATH))
+    conn = sqlite3.connect(str(_CRASH_DB_PATH))
     rows = conn.execute(
-        "SELECT id, device_id, hostname, os, traceback, log_tail, created_at FROM crash_logs ORDER BY id DESC LIMIT 100"
+        "SELECT id, device_id, hostname, os, traceback, log_tail, created_at, status FROM crash_logs ORDER BY id DESC LIMIT 100"
     ).fetchall()
     conn.close()
 
     import html as _html
 
-    def _build_row(r):
+    def _build_row(idx, r):
         tb_short = (r[4][:200] + "...") if len(r[4]) > 200 else r[4]
+        status_display = "已解决" if r[7] == "resolved" else "待处理"
+        status_class = "resolved" if r[7] == "resolved" else "pending"
+        resolve_btn = "" if r[7] == "resolved" else f'<button class="resolve-btn" onclick="resolveLog({r[0]})">已解决</button>'
         return (
-            f'<tr data-id="{r[0]}">'
-            f'<td>{r[0]}</td>'
+            f'<tr data-id="{r[0]}" class="status-{r[7]}">'
+            f'<td>{idx}</td>'
             f'<td>{_html.escape(str(r[1])[:8])}\u2026</td>'
             f'<td>{_html.escape(str(r[2]))}</td>'
             f'<td>{_html.escape(str(r[3]))}</td>'
             f'<td class="traceback">{_html.escape(tb_short)}</td>'
+            f'<td><span class="status-badge {status_class}">{status_display}</span></td>'
             f'<td>{r[6]}</td>'
-            f'<td><button class="detail-btn" onclick="showDetail({r[0]})">详情</button></td>'
+            f'<td>{resolve_btn} <button class="del-btn" onclick="deleteLog({r[0]})">删除</button> <button class="detail-btn" onclick="showDetail({r[0]})">详情</button></td>'
             f'</tr>'
         )
 
-    trs = "".join(_build_row(r) for r in rows)
+    trs = "".join(_build_row(i, r) for i, r in enumerate(rows, 1))
 
     # build JSON for JS
     import json as _json
@@ -972,11 +1143,11 @@ def crash_logs_page(_=Depends(_verify_admin)):
 <html lang="zh-CN">
 <head><meta charset="utf-8"><title>崩溃日志</title><style>{_CRASH_LOG_CSS}</style></head>
 <body><h1>崩溃日志</h1>
-<table><thead><tr><th>#</th><th>设备</th><th>主机名</th><th>系统</th><th>异常摘要</th><th>时间</th><th>操作</th></tr></thead>
+<table><thead><tr><th>#</th><th>设备</th><th>主机名</th><th>系统</th><th>异常摘要</th><th>状态</th><th>时间</th><th>操作</th></tr></thead>
 <tbody>{trs}</tbody></table>
 
-<div class="modal-overlay" id="overlay" onclick="closeModal()"></div>
-<div class="modal" id="modal">
+<div class="modal-overlay" id="overlay" style="display:none" onclick="closeModal()"></div>
+<div class="modal" id="modal" style="display:none">
   <button class="close-btn" onclick="closeModal()">&times;</button>
   <h2 id="modal-title">崩溃详情</h2>
   <h3>Traceback</h3>
@@ -1002,6 +1173,20 @@ function showDetail(id) {{
 function closeModal() {{
     document.getElementById("overlay").style.display = "none";
     document.getElementById("modal").style.display = "none";
+}}
+function deleteLog(id) {{
+    if (!confirm("确定删除该崩溃日志？")) return;
+    fetch("/crash-logs/"+id, {{method:"DELETE"}}).then(function(r){{
+        if (r.ok) location.reload();
+        else alert("删除失败");
+    }});
+}}
+function resolveLog(id) {{
+    if (!confirm("标记为已解决？")) return;
+    fetch("/crash-logs/"+id+"/resolve", {{method:"PUT"}}).then(function(r){{
+        if (r.ok) location.reload();
+        else alert("操作失败");
+    }});
 }}
 </script>
 </body></html>"""
