@@ -1,4 +1,4 @@
-﻿import requests
+import requests
 import tempfile
 from pathlib import Path
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -19,13 +19,12 @@ def dbg(*args, **kwargs):
 _session = requests.Session()
 _session.proxies = {"http": None, "https": None}
 
-# HOST = "https://79ecf59845b9061dd3d3a9d55cf83772.hjylock.top"
-HOST = "http://192.168.1.34:9825"
+HOST = "https://79ecf59845b9061dd3d3a9d55cf83772.hjylock.top"
+# HOST = "http://192.168.1.34:9825"
 # HOST = "http://127.0.0.1:8000"
 API_URL = f"{HOST}/check-updates"
 LOGIN_URL = f"{HOST}/login"
 AUTO_LOGIN_URL = f"{HOST}/auto-login"
-GITHUB_UPDATE_URL = "https://gh-proxy.org/https://raw.githubusercontent.com/hjy2008/Spark/main/update.json"
 FEEDBACK_URL = f"{HOST}/feedback"
 UPLOAD_AVATAR_URL = f"{HOST}/upload-avatar"
 CRASH_REPORT_URL = f"{HOST}/crash-report"
@@ -38,29 +37,21 @@ class CheckUpdateThread(QThread):
 
     def __init__(self, url=None, current_version=None, parent=None):
         super().__init__(parent)
-        self.url = url or GITHUB_UPDATE_URL
+        self.url = url or API_URL
         self.current_version = current_version or CURRENT_VERSION
         dbg(f"[CheckUpdateThread] __init__ url={self.url}")
 
     def run(self):
         dbg("[CheckUpdateThread] run() started")
         try:
-            dbg(f"[CheckUpdateThread] GET {self.url}")
-            resp = _session.get(self.url, timeout=10)
+            body = encrypt_payload({"current_version": self.current_version})
+            dbg(f"[CheckUpdateThread] POST {self.url}")
+            resp = _session.post(self.url, json={"data": body}, timeout=5)
             dbg(f"[CheckUpdateThread] HTTP {resp.status_code}")
             resp.raise_for_status()
-            data = resp.json()
-            dbg(f"[CheckUpdateThread] remote_version={data.get('latest_version')}")
-            has_update = data.get("latest_version", "") != self.current_version
-            dbg(f"[CheckUpdateThread] has_update={has_update}")
-            self.finished.emit({
-                "has_update": has_update,
-                "latest_version": data.get("latest_version"),
-                "download_url": data.get("download_url"),
-                "sha256": data.get("sha256"),
-                "release_notes": data.get("release_notes"),
-                "release_date": data.get("release_date"),
-            })
+            decrypted = aes_decrypt(resp.json()["data"])
+            dbg(f"[CheckUpdateThread] response keys={list(decrypted.keys())}")
+            self.finished.emit(decrypted)
         except Exception as e:
             dbg(f"[CheckUpdateThread] error: {e}")
             self.finished.emit({"has_update": False, "error": str(e)})
@@ -125,7 +116,7 @@ class LoginThread(QThread):
                 try:
                     err = aes_decrypt(resp.json()["data"])
                     dbg(f"[LoginThread] error response keys={list(err.keys())}")
-                    self.loginFinished.emit({"success": False, "error": err.get("error", "璇锋眰澶辫触")})
+                    self.loginFinished.emit({"success": False, "error": err.get("error", "请求失败")})
                 except Exception as e2:
                     dbg(f"[LoginThread] decrypt error: {e2}")
                     self.loginFinished.emit({"success": False, "error": f"HTTP {resp.status_code}"})
@@ -159,7 +150,7 @@ class AutoLoginThread(QThread):
                 dbg(f"[AutoLoginThread] HTTP not OK: {resp.status_code}")
                 try:
                     err = aes_decrypt(resp.json()["data"])
-                    self.loginFinished.emit({"success": False, "error": err.get("error", "璇锋眰澶辫触")})
+                    self.loginFinished.emit({"success": False, "error": err.get("error", "请求失败")})
                 except Exception:
                     self.loginFinished.emit({"success": False, "error": f"HTTP {resp.status_code}"})
                 return
@@ -195,7 +186,7 @@ class MediaParseThread(QThread):
             if decrypted.get("succ"):
                 self.parseFinished.emit(decrypted)
             else:
-                self.parseError.emit(decrypted.get("retdesc", "瑙ｆ瀽澶辫触"))
+                self.parseError.emit(decrypted.get("retdesc", "解析失败"))
         except Exception as e:
             dbg(f"[MediaParseThread] exception: {e}")
             self.parseError.emit(str(e))
@@ -250,4 +241,3 @@ class UploadAvatarThread(QThread):
         except Exception as e:
             dbg(f"[UploadAvatarThread] exception: {e}")
             self.uploadFinished.emit({"success": False, "error": str(e)})
-
