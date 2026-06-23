@@ -123,6 +123,12 @@ PPT 转换参数（`src/common/config_items.py`）：
 - 服务端登录限流：每 IP 5 次/60s，每日每设备 20 次
 
 ## Release
+**v1.0.2** | 2026-06-23
+
+修复了登录时缺少资源的 bug
+
+[Download](https://github.com/hjy2008/Spark/releases/tag/v1.0.2)
+
 **v1.0.1** | 2026-06-23
 
 Spark 正式发布！

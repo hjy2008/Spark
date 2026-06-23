@@ -30,7 +30,7 @@ FEEDBACK_URL = f"{HOST}/feedback"
 UPLOAD_AVATAR_URL = f"{HOST}/upload-avatar"
 CRASH_REPORT_URL = f"{HOST}/crash-report"
 MEDIA_PARSE_URL = f"{HOST}/media_parse"
-CURRENT_VERSION = "v1.0.1"
+CURRENT_VERSION = "v1.0.2"
 
 
 class CheckUpdateThread(QThread):
