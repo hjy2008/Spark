@@ -125,6 +125,12 @@ PPT 转换参数（`src/common/config_items.py`）：
 ## Release
 **v1.0.2** | 2026-06-23
 
+修复了登录缺少资源的 bug
+
+[Download](https://github.com/hjy2008/Spark/releases/tag/v1.0.2)
+
+**v1.0.2** | 2026-06-23
+
 修复了登录时缺少资源的 bug
 
 [Download](https://github.com/hjy2008/Spark/releases/tag/v1.0.2)
