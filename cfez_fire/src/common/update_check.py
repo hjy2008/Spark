@@ -30,7 +30,7 @@ FEEDBACK_URL = f"{HOST}/feedback"
 UPLOAD_AVATAR_URL = f"{HOST}/upload-avatar"
 CRASH_REPORT_URL = f"{HOST}/crash-report"
 MEDIA_PARSE_URL = f"{HOST}/media_parse"
-CURRENT_VERSION = "v1.0.0"
+CURRENT_VERSION = "v1.0.1"
 
 
 class CheckUpdateThread(QThread):
@@ -50,7 +50,8 @@ class CheckUpdateThread(QThread):
             decrypted = {
                 "has_update": self.compare_versions(response['latest_version'], CURRENT_VERSION),
                 "download_url": response['download_url'],
-                'latest_version': response['latest_version']
+                'latest_version': response['latest_version'],
+                'release_notes': response['release_notes'],
             }
             # print(decrypted)
             self.finished.emit(decrypted)
