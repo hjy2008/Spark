@@ -1,3 +1,4 @@
+import hashlib
 import requests
 import tempfile
 from pathlib import Path
@@ -8,6 +9,7 @@ from datetime import datetime
 from common.crypto import encrypt_payload, aes_encrypt, aes_decrypt
 
 DEBUG = True
+
 
 def dbg(*args, **kwargs):
     if DEBUG:
@@ -22,7 +24,6 @@ _session.proxies = {"http": None, "https": None}
 HOST = "https://79ecf59845b9061dd3d3a9d55cf83772.hjylock.top"
 # HOST = "http://192.168.1.34:9825"
 # HOST = "http://127.0.0.1:8000"
-API_URL = f"{HOST}/check-updates"
 GITHUB_UPDATE_URL = "https://gh-proxy.org/https://raw.githubusercontent.com/hjy2008/Spark/main/update.json"
 LOGIN_URL = f"{HOST}/login"
 AUTO_LOGIN_URL = f"{HOST}/auto-login"
@@ -30,15 +31,15 @@ FEEDBACK_URL = f"{HOST}/feedback"
 UPLOAD_AVATAR_URL = f"{HOST}/upload-avatar"
 CRASH_REPORT_URL = f"{HOST}/crash-report"
 MEDIA_PARSE_URL = f"{HOST}/media_parse"
-CURRENT_VERSION = "v1.0.2"
+CURRENT_VERSION = "v1.0.3"
 
 
 class CheckUpdateThread(QThread):
-    finished = pyqtSignal(dict)
+    checkFinished = pyqtSignal(dict)
 
     def __init__(self, url=None, current_version=None, parent=None):
         super().__init__(parent)
-        self.url = url or API_URL
+        self.url = url or GITHUB_UPDATE_URL
         self.current_version = current_version or CURRENT_VERSION
         dbg(f"[CheckUpdateThread] __init__ url={self.url}")
 
@@ -46,39 +47,29 @@ class CheckUpdateThread(QThread):
         dbg("[CheckUpdateThread] run() started")
         try:
             response = requests.get(self.url, timeout=10).json()
-            # print(bool(self.compare_versions(response['latest_version'], CURRENT_VERSION)))
+            remote_ver = response["latest_version"]
+            has_update = _parse_version(remote_ver) > _parse_version(self.current_version)
             decrypted = {
-                "has_update": self.compare_versions(response['latest_version'], CURRENT_VERSION),
-                "download_url": response['download_url'],
-                'latest_version': response['latest_version'],
-                'release_notes': response['release_notes'],
+                "has_update": has_update,
+                "download_url": response["download_url"],
+                "latest_version": remote_ver,
+                "release_notes": response["release_notes"],
+                "sha256": response.get("sha256", ""),
             }
-            # print(decrypted)
-            self.finished.emit(decrypted)
+            self.checkFinished.emit(decrypted)
         except Exception as e:
             dbg(f"[CheckUpdateThread] error: {e}")
-            self.finished.emit({"has_update": False, "error": str(e)})
-
-    @staticmethod
-    def compare_versions(v1: str, v2: str) -> int:
-        """Compare two version strings like "v1.0.0" and "v1.0.1".
-        Returns 1 if v1 > v2, -1 if v1 < v2, 0 if equal.
-        """
-
-        def parse(v: str):
-            return tuple(int(p) for p in v.lstrip("vV").split("."))
-
-        a, b = parse(v1), parse(v2)
-        return (a > b) - (a < b)
+            self.checkFinished.emit({"has_update": False, "error": str(e)})
 
 
 class DownloadThread(QThread):
-    finished = pyqtSignal(str)
+    downloadFinished = pyqtSignal(str)
 
-    def __init__(self, url, parent=None):
+    def __init__(self, url, sha256="", parent=None):
         super().__init__(parent)
         self.url = url
-        dbg(f"[DownloadThread] __init__ url={url}")
+        self.sha256 = sha256
+        dbg(f"[DownloadThread] __init__ url={url} sha256={sha256[:16] if sha256 else 'none'}...")
 
     def run(self):
         dbg("[DownloadThread] run() started")
@@ -92,15 +83,29 @@ class DownloadThread(QThread):
             dest = Path(tempfile.gettempdir()) / f"update{suffix}"
             dbg(f"[DownloadThread] saving to {dest}")
 
+            h = hashlib.sha256()
             with open(dest, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
-            dbg(f"[DownloadThread] done, size={dest.stat().st_size}")
-            self.finished.emit(str(dest))
+                        h.update(chunk)
+            actual_sha = h.hexdigest()
+            dbg(f"[DownloadThread] done, size={dest.stat().st_size}, sha256={actual_sha}")
+
+            if self.sha256 and actual_sha != self.sha256:
+                dbg(f"[DownloadThread] SHA256 mismatch: expected {self.sha256}, got {actual_sha}")
+                dest.unlink(missing_ok=True)
+                self.downloadFinished.emit("")
+                return
+
+            self.downloadFinished.emit(str(dest))
         except Exception as e:
             dbg(f"[DownloadThread] error: {e}")
-            self.finished.emit("")
+            self.downloadFinished.emit("")
+
+
+def _parse_version(v: str) -> tuple:
+    return tuple(int(p) for p in v.lstrip("vV").split("."))
 
 
 class LoginThread(QThread):
@@ -131,7 +136,7 @@ class LoginThread(QThread):
                 try:
                     err = aes_decrypt(resp.json()["data"])
                     dbg(f"[LoginThread] error response keys={list(err.keys())}")
-                    self.loginFinished.emit({"success": False, "error": err.get("error", "请求失败")})
+                    self.loginFinished.emit({"success": False, "error": err.get("error", "\u8bf7\u6c42\u5931\u8d25")})
                 except Exception as e2:
                     dbg(f"[LoginThread] decrypt error: {e2}")
                     self.loginFinished.emit({"success": False, "error": f"HTTP {resp.status_code}"})
@@ -165,7 +170,7 @@ class AutoLoginThread(QThread):
                 dbg(f"[AutoLoginThread] HTTP not OK: {resp.status_code}")
                 try:
                     err = aes_decrypt(resp.json()["data"])
-                    self.loginFinished.emit({"success": False, "error": err.get("error", "请求失败")})
+                    self.loginFinished.emit({"success": False, "error": err.get("error", "\u8bf7\u6c42\u5931\u8d25")})
                 except Exception:
                     self.loginFinished.emit({"success": False, "error": f"HTTP {resp.status_code}"})
                 return
@@ -201,7 +206,7 @@ class MediaParseThread(QThread):
             if decrypted.get("succ"):
                 self.parseFinished.emit(decrypted)
             else:
-                self.parseError.emit(decrypted.get("retdesc", "解析失败"))
+                self.parseError.emit(decrypted.get("retdesc", "\u89e3\u6790\u5931\u8d25"))
         except Exception as e:
             dbg(f"[MediaParseThread] exception: {e}")
             self.parseError.emit(str(e))
@@ -256,4 +261,3 @@ class UploadAvatarThread(QThread):
         except Exception as e:
             dbg(f"[UploadAvatarThread] exception: {e}")
             self.uploadFinished.emit({"success": False, "error": str(e)})
-

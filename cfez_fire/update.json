@@ -1,7 +1,7 @@
 {
-  "latest_version": "v1.0.2",
-  "download_url": "https://gh-proxy.org/https://github.com/hjy2008/Spark/releases/download/v1.0.2/Spark_Setup_v1.0.2.exe",
-  "sha256": "e390577114b4c249b361977f1d421abe4d44fc92215d2c1356f56ec8512620e1",
-  "release_notes": "修复了登录缺少资源的 bug",
-  "release_date": "2026-06-23"
+  "latest_version": "v1.0.3",
+  "download_url": "https://gh-proxy.org/https://github.com/hjy2008/Spark/releases/download/v1.0.3/Spark_Setup_v1.0.3.exe",
+  "sha256": "a1ade016ff16d19adedae604d8c58769ae0dabe75e2803edcb78a46119edd735",
+  "release_notes": "修复了更新问题",
+  "release_date": "2026-06-25"
 }
